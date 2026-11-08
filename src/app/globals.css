@@ -28,6 +28,25 @@ body {
   outline-offset: 2px;
 }
 
+/* Toque: remove o atraso e o zoom de duplo toque; evita puxar-para-atualizar durante a transmissão. */
+button,
+a,
+input,
+select,
+summary,
+label {
+  touch-action: manipulation;
+}
+body {
+  overscroll-behavior-y: contain;
+}
+
+/* Seções abaixo da dobra só são desenhadas quando chegam perto da tela. */
+.cv {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 520px;
+}
+
 .display {
   font-weight: 900;
   letter-spacing: -0.045em;
@@ -154,6 +173,24 @@ body {
   }
   .ctl:focus-visible {
     outline-color: #fff;
+  }
+}
+
+/* Telas de toque: alvos de pelo menos 44 px. */
+@media (pointer: coarse) {
+  .btn,
+  .btn-sm {
+    min-height: 44px;
+  }
+  .ctl {
+    min-width: 44px;
+    height: 44px;
+  }
+  .chip {
+    min-height: 32px;
+  }
+  input[type='range'] {
+    min-height: 28px;
   }
 }
 

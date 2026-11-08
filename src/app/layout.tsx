@@ -5,6 +5,8 @@ export const metadata: Metadata = {
   title: { default: 'infinityTransmissão: assista telas com amigos em tempo real', template: '%s | infinityTransmissão' },
   description: 'Compartilhe a tela e assista junto com os amigos, em alta resolução e baixa latência. Sem anúncios, sem rastreamento e sem gravação.',
   applicationName: 'infinityTransmissão',
+  appleWebApp: { capable: true, title: 'infinityTransmissão', statusBarStyle: 'black-translucent' },
+  formatDetection: { telephone: false },
 };
 
 export const viewport: Viewport = {
