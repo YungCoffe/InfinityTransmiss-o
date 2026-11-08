@@ -1,10 +1,11 @@
+import { memo } from 'react';
 import { Icon } from './Icon';
 import { SantaHat } from './Christmas';
 import { StatusDot } from './StatusDot';
 import { CHRISTMAS } from '@/lib/theme';
 import type { Participant } from '@/lib/types';
 
-export default function ParticipantList({ participants, youId }: { participants: Participant[]; youId?: string }) {
+function ParticipantList({ participants, youId }: { participants: Participant[]; youId?: string }) {
   const viewers = participants.filter((p) => p.role === 'viewer' && p.status !== 'disconnected').length;
   return (
     <section className="card p-4" aria-label="Participantes">
@@ -39,3 +40,5 @@ export default function ParticipantList({ participants, youId }: { participants:
     </section>
   );
 }
+
+export default memo(ParticipantList);

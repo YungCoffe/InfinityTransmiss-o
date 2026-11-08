@@ -5,8 +5,9 @@ import { useEffect, useRef } from 'react';
 type Flake = { x: number; y: number; r: number; v: number; d: number; p: number };
 
 /**
- * Neve em canvas, restrita ao elemento pai (que precisa ser "relative"). Usada só na página inicial:
- * dentro da sala nada é animado para não competir com a transmissão por CPU.
+ * Neve em canvas, restrita ao elemento pai (que precisa ser "relative"). Só existe na página inicial.
+ * Otimizações: pausa quando fora da tela ou com a aba oculta, 30 quadros e menos flocos no celular,
+ * desligada com "reduzir movimento" ou economia de dados.
  */
 export default function Snow({ active = true }: { active?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -15,14 +16,19 @@ export default function Snow({ active = true }: { active?: boolean }) {
     const canvas = ref.current;
     const parent = canvas?.parentElement;
     if (!canvas || !parent || !active) return;
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const conn: any = (navigator as any).connection;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || conn?.saveData) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    const coarse = window.matchMedia('(pointer: coarse)').matches;
+    const frameMs = coarse ? 1000 / 30 : 1000 / 60;
+    const maxFlakes = coarse ? 40 : 90;
     let w = 0;
     let h = 0;
     let raf = 0;
     let last = 0;
+    let visible = true;
     let flakes: Flake[] = [];
 
     const spawn = (anywhere: boolean): Flake => ({
@@ -36,16 +42,18 @@ export default function Snow({ active = true }: { active?: boolean }) {
 
     const resize = () => {
       const rect = parent.getBoundingClientRect();
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, coarse ? 1 : 1.5);
       w = rect.width;
       h = rect.height;
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      flakes = Array.from({ length: Math.min(90, Math.round((w * h) / 9000)) }, () => spawn(true));
+      flakes = Array.from({ length: Math.min(maxFlakes, Math.round((w * h) / 9000)) }, () => spawn(true));
     };
 
     const frame = (t: number) => {
+      raf = requestAnimationFrame(frame);
+      if (t - last < frameMs - 2) return;
       const dt = Math.min(0.05, (t - (last || t)) / 1000);
       last = t;
       ctx.clearRect(0, 0, w, h);
@@ -58,26 +66,31 @@ export default function Snow({ active = true }: { active?: boolean }) {
         ctx.arc(f.x + Math.sin(f.p) * f.d, f.y, f.r, 0, Math.PI * 2);
         ctx.fill();
       }
-      raf = requestAnimationFrame(frame);
     };
 
-    const onVisibility = () => {
+    const update = () => {
       cancelAnimationFrame(raf);
-      if (!document.hidden) {
+      if (visible && !document.hidden) {
         last = 0;
         raf = requestAnimationFrame(frame);
       }
     };
 
     resize();
-    raf = requestAnimationFrame(frame);
     const ro = new ResizeObserver(resize);
     ro.observe(parent);
-    document.addEventListener('visibilitychange', onVisibility);
+    const io = new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      update();
+    });
+    io.observe(parent);
+    document.addEventListener('visibilitychange', update);
+    update();
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
-      document.removeEventListener('visibilitychange', onVisibility);
+      io.disconnect();
+      document.removeEventListener('visibilitychange', update);
     };
   }, [active]);
 

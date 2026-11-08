@@ -20,10 +20,10 @@ const CREATE_ERRORS: Record<string, string> = {
 };
 
 const FEATURES: [string, string][] = [
-  ['Alta resolução', 'Transmita em até 1440p e ajuste a qualidade conforme a sua internet.'],
+  ['Qualidade máxima', 'Até 4K e 60 fps, com ajuste automático à sua internet e ao seu aparelho.'],
+  ['Tela, câmera e áudio', 'Compartilhe a tela, use a câmera e o microfone, ou junte tudo numa transmissão só.'],
   ['Baixa latência', 'O vídeo vai direto de um navegador para o outro, com WebRTC.'],
-  ['Privacidade', 'Nada é gravado. Sem anúncios e sem rastreamento invasivo.'],
-  ['PC e celular', 'Assista pelo celular. Para transmitir, use um computador.'],
+  ['PC e celular', 'Assista pelo celular ou transmita com a câmera dele. Nada é gravado.'],
 ];
 
 export default function HomeClient() {
@@ -42,14 +42,19 @@ export default function HomeClient() {
   useEffect(() => {
     setName(lsGet('itx:name') ?? '');
     setSnow(lsGet('itx:snow') !== 'off');
-    // Indicador de servidor/WebSocket no rodapé: também serve como teste rápido de que o Socket.IO está de pé.
+    // Indicador de servidor/WebSocket no rodapé (também é um teste rápido do Socket.IO).
+    // A conexão espera o navegador ficar ocioso para não competir com o carregamento da página.
     const s = getSocket();
     const up = () => setServer('connected');
     const down = () => setServer('disconnected');
     s.on('connect', up);
     s.on('disconnect', down);
-    connectSocket().then(up).catch(down);
+    const w = window as any;
+    const run = () => connectSocket().then(up).catch(down);
+    const id = w.requestIdleCallback ? w.requestIdleCallback(run, { timeout: 2500 }) : setTimeout(run, 800);
     return () => {
+      if (w.cancelIdleCallback) w.cancelIdleCallback(id);
+      else clearTimeout(id);
       s.off('connect', up);
       s.off('disconnect', down);
     };
@@ -123,8 +128,8 @@ export default function HomeClient() {
                 <p className="mt-3 max-w-md font-medium text-white/90">Junte a galera, ligue a transmissão e passe as festas juntos, mesmo à distância.</p>
               )}
               <div className="mt-6 flex flex-wrap gap-2">
-                <span className="chip">Até 1440p</span>
-                <span className="chip">Baixa latência</span>
+                <span className="chip">Até 4K e 60 fps</span>
+                <span className="chip">Câmera e microfone</span>
                 <span className="chip">PC e celular</span>
                 {CHRISTMAS && <ChristmasCountdown />}
               </div>
@@ -203,7 +208,7 @@ export default function HomeClient() {
         </section>
         <div className="candy" aria-hidden="true" />
 
-        <section className="mx-auto max-w-6xl px-4 py-10">
+        <section className="cv mx-auto max-w-6xl px-4 py-10">
           <dl className="grid divide-y-2 divide-ink overflow-hidden rounded-2xl border-2 border-ink sm:grid-cols-2 sm:divide-y-0 lg:grid-cols-4 lg:divide-x-2">
             {FEATURES.map(([title, text]) => (
               <div key={title} className="p-5 sm:[&:nth-child(n+3)]:border-t-2 sm:[&:nth-child(n+3)]:border-ink lg:[&:nth-child(n+3)]:border-t-0">
@@ -214,20 +219,20 @@ export default function HomeClient() {
           </dl>
         </section>
 
-        <section className="mx-auto max-w-6xl px-4 pb-12">
+        <section className="cv mx-auto max-w-6xl px-4 pb-12">
           <h2 className="text-2xl font-black">Antes de transmitir</h2>
           <div className="mt-4 grid gap-4 md:grid-cols-3">
             <div className="rounded-2xl border-2 border-ink p-4">
               <h3 className="font-black">Mantenha a aba aberta</h3>
-              <p className="mt-1 text-sm font-medium text-zinc-700">A transmissão continua se você trocar de aba ou minimizar o navegador, mas para se a aba for fechada. Nada é capturado com o site fechado.</p>
+              <p className="mt-1 text-sm font-medium text-zinc-700">No computador a transmissão continua se você trocar de aba ou minimizar o navegador, mas para se a aba for fechada. Nada é capturado com o site fechado.</p>
             </div>
             <div className="rounded-2xl border-2 border-ink p-4">
               <h3 className="font-black">No celular</h3>
-              <p className="mt-1 text-sm font-medium text-zinc-700">Compartilhar a tela inteira depende do sistema (iOS e Android) e do navegador, e na maioria dos celulares não está disponível. Como espectador, funciona bem.</p>
+              <p className="mt-1 text-sm font-medium text-zinc-700">Você assiste e também pode transmitir pela câmera e pelo microfone. Compartilhar a tela depende do sistema e do navegador e, na maioria dos celulares, não está disponível.</p>
             </div>
             <div className="rounded-2xl border-2 border-ink p-4">
-              <h3 className="font-black">Áudio da aba</h3>
-              <p className="mt-1 text-sm font-medium text-zinc-700">No Chrome e no Edge, escolha uma aba e marque “Compartilhar áudio da aba” para enviar o som junto com a imagem.</p>
+              <h3 className="font-black">Áudio, câmera e microfone</h3>
+              <p className="mt-1 text-sm font-medium text-zinc-700">No Chrome e no Edge, escolha uma aba e marque “Compartilhar áudio da aba”. Câmera e microfone são opcionais e só ligam se você permitir.</p>
             </div>
           </div>
         </section>

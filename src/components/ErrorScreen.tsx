@@ -12,9 +12,14 @@ export type ErrorKind =
   | 'replaced'
   | 'rate-limited'
   | 'capture'
-  | 'busy';
+  | 'busy'
+  | 'camera-denied'
+  | 'camera-missing'
+  | 'camera-busy'
+  | 'mic-denied'
+  | 'mic-missing';
 
-const COPY: Record<ErrorKind, { title: string; text: string }> = {
+export const ERROR_COPY: Record<ErrorKind, { title: string; text: string }> = {
   'not-found': { title: 'Sala não encontrada', text: 'Confira o código de 6 caracteres ou peça um novo link ao apresentador.' },
   closed: { title: 'Sala encerrada', text: 'O apresentador encerrou esta sala ou ela expirou por inatividade. Crie uma nova sala para transmitir de novo.' },
   full: { title: 'Sala cheia', text: 'Esta sala atingiu o limite de espectadores. Tente de novo em alguns instantes ou peça ao apresentador para liberar uma vaga.' },
@@ -31,6 +36,17 @@ const COPY: Record<ErrorKind, { title: string; text: string }> = {
   replaced: { title: 'Sala aberta em outra aba', text: 'Você entrou nesta sala em outra aba ou janela. Use a aba mais recente ou entre de novo aqui.' },
   'rate-limited': { title: 'Muitas tentativas', text: 'Você fez muitas tentativas em pouco tempo. Aguarde cerca de um minuto e tente de novo.' },
   capture: { title: 'Não foi possível capturar a tela', text: 'O navegador não conseguiu iniciar a captura. Tente escolher outra fonte ou recarregue a página.' },
+  'camera-denied': {
+    title: 'Câmera bloqueada',
+    text: 'O acesso à câmera foi negado. Libere a câmera para este site nas configurações do navegador (ícone de cadeado ao lado do endereço) e tente de novo.',
+  },
+  'camera-missing': { title: 'Câmera não encontrada', text: 'Não encontramos nenhuma câmera neste aparelho. Conecte uma câmera ou compartilhe a tela.' },
+  'camera-busy': { title: 'Câmera em uso', text: 'Outro aplicativo ou aba está usando a câmera. Feche-o e tente de novo.' },
+  'mic-denied': {
+    title: 'Microfone bloqueado',
+    text: 'O acesso ao microfone foi negado. Libere o microfone para este site nas configurações do navegador e ligue-o de novo.',
+  },
+  'mic-missing': { title: 'Microfone não encontrado', text: 'Não encontramos nenhum microfone neste aparelho.' },
   busy: { title: 'Servidor ocupado', text: 'O servidor atingiu o limite de salas ativas. Tente criar a sala de novo em alguns minutos.' },
 };
 
@@ -44,7 +60,7 @@ interface Props {
 }
 
 export default function ErrorScreen({ kind, description, onRetry, retryLabel = 'Tentar de novo', compact = false, hideHome = false }: Props) {
-  const c = COPY[kind];
+  const c = ERROR_COPY[kind];
   const card = (
     <div role="alert" className="card w-full max-w-md p-6 text-center text-black">
       <span className="mx-auto grid h-12 w-12 place-items-center rounded-full border-2 border-ink bg-brand-600 text-white">
