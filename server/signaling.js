@@ -57,7 +57,7 @@ function registerSignaling(io, manager) {
     if (part.role === 'viewer') {
       toHost(room, 'viewer:left', { clientId: part.clientId });
     } else if (room.stream.streaming) {
-      room.stream = { streaming: false, paused: false };
+      room.stream = { streaming: false, paused: false, source: 'screen', camera: false };
       io.to(room.code).emit('stream:state', room.stream);
     }
     broadcast(room);
@@ -210,6 +210,8 @@ function registerSignaling(io, manager) {
           status: 'connected',
           socketId: socket.id,
           epoch: p.epoch,
+          // Altura (em pixels) que a tela deste espectador consegue mostrar; o host não envia mais que isso.
+          maxHeight: Number.isInteger(p.maxHeight) && p.maxHeight >= 240 && p.maxHeight <= 4320 ? p.maxHeight : 0,
         });
         room.participants.set(clientId, part);
         if (isHost) room.hostClientId = clientId;
@@ -219,7 +221,7 @@ function registerSignaling(io, manager) {
         room.lastActivityAt = Date.now();
 
         broadcast(room);
-        if (!isHost) toHost(room, 'viewer:joined', { clientId, epoch: part.epoch });
+        if (!isHost) toHost(room, 'viewer:joined', { clientId, epoch: part.epoch, maxHeight: part.maxHeight || null });
 
         return ok({
           role: part.role,
@@ -258,7 +260,12 @@ function registerSignaling(io, manager) {
         const c = ctx('host');
         if (!c) return fail('FORBIDDEN');
         const streaming = p.streaming === true;
-        c.room.stream = { streaming, paused: streaming && p.paused === true };
+        c.room.stream = {
+          streaming,
+          paused: streaming && p.paused === true,
+          source: p.source === 'camera' ? 'camera' : 'screen',
+          camera: streaming && p.camera === true,
+        };
         c.room.lastActivityAt = Date.now();
         io.to(c.room.code).emit('stream:state', c.room.stream);
         return ok();
@@ -283,7 +290,7 @@ function registerSignaling(io, manager) {
     socket.on('viewer:request-stream', () => {
       const c = ctx('viewer');
       if (!c || !requestLimiter.take(c.part.clientId)) return;
-      toHost(c.room, 'viewer:request', { clientId: c.part.clientId, epoch: c.part.epoch });
+      toHost(c.room, 'viewer:request', { clientId: c.part.clientId, epoch: c.part.epoch, maxHeight: c.part.maxHeight || null });
     });
 
     socket.on('disconnect', () => {

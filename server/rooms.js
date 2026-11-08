@@ -57,7 +57,7 @@ class RoomManager {
       lastActivityAt: now,
       hostClientId: null,
       participants: new Map(),
-      stream: { streaming: false, paused: false },
+      stream: { streaming: false, paused: false, source: 'screen', camera: false },
     };
     this.rooms.set(code, room);
     return { room, hostKey };
@@ -85,7 +85,7 @@ class RoomManager {
   activeViewers(room) {
     const out = [];
     for (const p of room.participants.values()) {
-      if (p.role === 'viewer' && p.status !== 'disconnected') out.push({ clientId: p.clientId, epoch: p.epoch });
+      if (p.role === 'viewer' && p.status !== 'disconnected') out.push({ clientId: p.clientId, epoch: p.epoch, maxHeight: p.maxHeight || null });
     }
     return out;
   }
