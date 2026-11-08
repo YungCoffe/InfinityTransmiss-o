@@ -1,1 +1,23 @@
+// Guarda apenas metadados das salas (nunca vídeo, áudio ou gravações).
+// Em produção no Render o disco é efêmero: os dados somem a cada novo deploy, o que é aceitável aqui.
+// Se alterar este modelo, ajuste também o CREATE TABLE em server/store.js.
 
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Room {
+  code           String  @id
+  hostName       String
+  hostKeyHash    String
+  passwordHash   String?
+  status         String  @default("open")
+  createdAt      BigInt
+  lastActivityAt BigInt
+  closedAt       BigInt?
+}
