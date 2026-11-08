@@ -1,0 +1,28 @@
+# Blueprint opcional: no Render, "New +" > "Blueprint" e aponte para o repositório.
+services:
+  - type: web
+    name: infinity-transmissao
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        value: file:./dev.db
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ALLOWED_ORIGIN
+        sync: false
+      - key: ROOM_INACTIVITY_MINUTES
+        value: "60"
+      - key: TURN_URL
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false
