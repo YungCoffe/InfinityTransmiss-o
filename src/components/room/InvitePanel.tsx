@@ -1,11 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Icon } from '@/components/Icon';
 import QrModal from '@/components/QrModal';
 import { useCopy } from '@/lib/hooks';
 
-export default function InvitePanel({ code, protectedRoom }: { code: string; protectedRoom: boolean }) {
+function InvitePanel({ code, protectedRoom }: { code: string; protectedRoom: boolean }) {
   const [codeCopied, copyCode] = useCopy();
   const [linkCopied, copyLink] = useCopy();
   const [qr, setQr] = useState(false);
@@ -42,3 +42,5 @@ export default function InvitePanel({ code, protectedRoom }: { code: string; pro
     </section>
   );
 }
+
+export default memo(InvitePanel);

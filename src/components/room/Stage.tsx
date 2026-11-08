@@ -1,14 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '@/components/Icon';
-import ErrorScreen from '@/components/ErrorScreen';
-import { formatKbps, lsGet, lsSet, supportsDisplayCapture } from '@/lib/utils';
+import ErrorScreen, { type ErrorKind } from '@/components/ErrorScreen';
+import { formatKbps, lsGet, lsSet, supportsCamera, supportsDisplayCapture } from '@/lib/utils';
+import { useViewerStats } from '@/lib/hooks';
 import type { RoomSession, Snapshot } from '@/lib/room-session';
 import type { LinkQuality } from '@/lib/webrtc';
 
 const QUALITY_LABEL: Record<LinkQuality, string> = { excellent: 'Excelente', good: 'Boa', fair: 'Instável', poor: 'Ruim' };
 const QUALITY_COLOR: Record<LinkQuality, string> = { excellent: 'bg-emerald-500', good: 'bg-lime-400', fair: 'bg-amber-400', poor: 'bg-red-600' };
+const BLOCKING: ErrorKind[] = ['permission', 'capture', 'camera-denied', 'camera-missing', 'camera-busy'];
 
 interface Overlay {
   title: string;
@@ -17,16 +19,127 @@ interface Overlay {
   action?: { label: string; onClick: () => void };
 }
 
-export default function Stage({ session, snap }: { session: RoomSession; snap: Snapshot }) {
+/** Indicador e painel de qualidade em componentes próprios: as métricas mudam a cada 2 s sem re-renderizar o palco. */
+function LinkBadge({ session, onToggle, open }: { session: RoomSession; onToggle: () => void; open: boolean }) {
+  const vs = useViewerStats(session);
+  return (
+    <button type="button" className="ctl gap-1.5 !px-2.5 text-xs font-bold" onClick={onToggle} aria-expanded={open} aria-label="Qualidade da conexão">
+      <span className={`h-2.5 w-2.5 rounded-full border border-white ${vs ? QUALITY_COLOR[vs.quality] : 'bg-zinc-400'}`} />
+      {vs ? QUALITY_LABEL[vs.quality] : 'Medindo'}
+    </button>
+  );
+}
+
+function StatsPanel({ session }: { session: RoomSession }) {
+  const vs = useViewerStats(session);
+  if (!vs) return null;
+  return (
+    <dl className="absolute bottom-14 right-2 grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5 rounded-xl border-2 border-white bg-black/90 p-3 text-xs text-white">
+      <dt className="text-white/70">Resolução</dt>
+      <dd className="font-bold">{vs.width ? `${vs.width}x${vs.height}` : '-'}</dd>
+      <dt className="text-white/70">Quadros por segundo</dt>
+      <dd className="font-bold">{vs.fps || '-'}</dd>
+      <dt className="text-white/70">Taxa de vídeo</dt>
+      <dd className="font-bold">{formatKbps(vs.kbps)}</dd>
+      <dt className="text-white/70">Perda de pacotes</dt>
+      <dd className="font-bold">{vs.lossPct}%</dd>
+      <dt className="text-white/70">Latência estimada</dt>
+      <dd className="font-bold">{vs.latencyMs !== null ? `${vs.latencyMs} ms` : '-'}</dd>
+      <dt className="text-white/70">Ping</dt>
+      <dd className="font-bold">{vs.rttMs !== null ? `${vs.rttMs} ms` : '-'}</dd>
+    </dl>
+  );
+}
+
+/** Tela inicial do apresentador: escolher tela ou câmera, e se o microfone entra junto. */
+function HostStart({ session, snap }: { session: RoomSession; snap: Snapshot }) {
+  const h = snap.host;
+  const canScreen = supportsDisplayCapture();
+  const canCam = supportsCamera();
+  const [last, setLast] = useState<'screen' | 'camera'>('screen');
+  const err = h.shareError as ErrorKind | null;
+  const blocking = !!err && BLOCKING.includes(err);
+  const micNote = err === 'mic-denied' || err === 'mic-missing';
+
+  if (!canScreen && !canCam) {
+    return (
+      <ErrorScreen
+        kind="unsupported"
+        compact
+        hideHome
+        description="Este navegador ou dispositivo não permite compartilhar a tela nem usar a câmera. Use uma versão atual do Chrome, Edge, Firefox ou Safari e abra o site em HTTPS."
+      />
+    );
+  }
+
+  const go = (kind: 'screen' | 'camera') => {
+    setLast(kind);
+    void (kind === 'screen' ? session.startScreen() : session.startCamera());
+  };
+
+  return (
+    <div className="mx-auto flex min-h-full w-full max-w-xl flex-col items-center justify-center gap-4 p-5 text-center">
+      {blocking && <ErrorScreen kind={err as ErrorKind} compact hideHome onRetry={() => go(last)} retryLabel="Tentar de novo" />}
+      {micNote && (
+        <p role="alert" className="rounded-xl border-2 border-white bg-brand-700 px-3 py-2 text-sm font-semibold">
+          {err === 'mic-denied' ? 'O microfone está bloqueado neste site. Libere-o nas configurações do navegador.' : 'Nenhum microfone foi encontrado.'}
+        </p>
+      )}
+      <div>
+        <h2 className="text-2xl font-black">Pronto para transmitir</h2>
+        <p className="mt-1 text-sm font-medium text-white/80">
+          {canScreen
+            ? 'Compartilhe a tela inteira, uma janela ou uma aba, ou use a câmera. Depois você ainda pode juntar a câmera à tela.'
+            : 'Compartilhar a tela não está disponível neste aparelho (comum no celular). Use a câmera ou abra a sala em um computador para compartilhar a tela.'}
+        </p>
+      </div>
+      <div className="flex w-full flex-col gap-3 sm:flex-row sm:justify-center">
+        {canScreen && (
+          <button type="button" className="btn btn-primary btn-lg !border-white !shadow-[4px_4px_0_0_#fff]" disabled={h.busy} onClick={() => go('screen')}>
+            <Icon name="monitor" size={22} />
+            Compartilhar tela
+          </button>
+        )}
+        {canCam && (
+          <button
+            type="button"
+            className={`btn btn-lg ${canScreen ? '' : 'btn-primary !border-white !shadow-[4px_4px_0_0_#fff]'}`}
+            disabled={h.busy}
+            onClick={() => go('camera')}
+          >
+            <Icon name="camera" size={22} />
+            Usar câmera
+          </button>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => void session.toggleMic()}
+        aria-pressed={h.micWanted}
+        className={`chip cursor-pointer ${h.micWanted ? '!bg-brand-600 !text-white !border-white' : ''}`}
+      >
+        <Icon name={h.micWanted ? 'mic' : 'micOff'} size={14} />
+        {h.micWanted ? 'Microfone ligado ao transmitir' : 'Microfone desligado'}
+      </button>
+      <p className="text-xs font-medium text-white/70">Mantenha esta aba aberta enquanto transmite.</p>
+    </div>
+  );
+}
+
+function Stage({ session, snap }: { session: RoomSession; snap: Snapshot }) {
   const isHost = snap.role === 'host';
-  const stream = isHost ? snap.host.localStream : snap.viewer.mediaStream;
+  const h = snap.host;
+  const stream = isHost ? h.localStream : snap.viewer.mediaStream;
+  const camStream = isHost ? h.localCamera : snap.stream.camera ? snap.viewer.cameraStream : null;
   const hostPart = snap.participants.find((p) => p.role === 'host');
   const hostName = hostPart?.name ?? snap.info?.hostName ?? 'Apresentador';
   const hostStatus = hostPart?.status ?? 'disconnected';
   const viewerCount = snap.participants.filter((p) => p.role === 'viewer' && p.status !== 'disconnected').length;
+  const mirror = isHost && h.facing === 'user'; // só a prévia do apresentador é espelhada (como um espelho)
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const camRef = useRef<HTMLVideoElement>(null);
   const [hasFrames, setHasFrames] = useState(false);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -35,6 +148,7 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
   const [idle, setIdle] = useState(false);
   const [pipOk, setPipOk] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
+  const [bubbleBig, setBubbleBig] = useState(false);
 
   useEffect(() => {
     const saved = lsGet('itx:vol');
@@ -58,6 +172,13 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
   }, [stream]);
 
   useEffect(() => {
+    const v = camRef.current;
+    if (!v) return;
+    if (v.srcObject !== camStream) v.srcObject = camStream;
+    if (camStream) v.play().catch(() => {});
+  }, [camStream]);
+
+  useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     v.muted = isHost || muted; // a prévia do apresentador é sempre muda para não gerar eco
@@ -67,7 +188,10 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
   // Ao voltar para a aba, garante que o vídeo continue tocando.
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === 'visible') videoRef.current?.play().catch(() => {});
+      if (document.visibilityState === 'visible') {
+        videoRef.current?.play().catch(() => {});
+        camRef.current?.play().catch(() => {});
+      }
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
@@ -83,7 +207,7 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
     };
   }, []);
 
-  // Em tela cheia, os controles somem após alguns segundos sem movimento.
+  // Em tela cheia, os controles somem após alguns segundos sem movimento ou toque.
   useEffect(() => {
     if (!fs) {
       setIdle(false);
@@ -136,10 +260,18 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
   const toggleFullscreen = useCallback(async () => {
     const el = containerRef.current;
     const v = videoRef.current as any;
+    const orientation: any = typeof screen !== 'undefined' ? (screen as any).orientation : null;
     try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else if (el?.requestFullscreen) await el.requestFullscreen();
-      else if (v?.webkitEnterFullscreen) v.webkitEnterFullscreen(); // iPhone: só o elemento <video> entra em tela cheia
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        orientation?.unlock?.();
+      } else if (el?.requestFullscreen) {
+        await el.requestFullscreen();
+        // No celular, vídeo horizontal em tela cheia deita a tela (onde o navegador permite).
+        if (v && v.videoWidth >= v.videoHeight) await orientation?.lock?.('landscape').catch(() => {});
+      } else if (v?.webkitEnterFullscreen) {
+        v.webkitEnterFullscreen(); // iPhone: só o elemento <video> entra em tela cheia
+      }
     } catch {
       /* o navegador recusou */
     }
@@ -158,7 +290,7 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
   /* ------------------------------------------------------------- avisos sobre o vídeo */
   let overlay: Overlay | null = null;
   if (isHost) {
-    if (snap.host.sharing && snap.host.paused) overlay = { title: 'Transmissão pausada', text: 'Os espectadores veem um aviso de pausa. Clique em Retomar para continuar.' };
+    if (h.sharing && h.paused) overlay = { title: 'Transmissão pausada', text: 'Os espectadores veem um aviso de pausa. Clique em Retomar para continuar.' };
   } else if (!snap.stream.streaming) {
     overlay =
       hostStatus === 'connected'
@@ -176,14 +308,15 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
     overlay = { title: 'Conectando à transmissão', text: snap.viewer.media === 'reconnecting' ? 'Reconectando o vídeo.' : 'Em instantes a imagem aparece.', spinner: true };
   }
 
-  const hostIdle = isHost && !snap.host.sharing;
-  const showControls = !hostIdle;
-  const vs = snap.viewer.stats;
+  const hostIdle = isHost && !h.sharing;
   const live = snap.stream.streaming;
 
+  // Celular: o palco ocupa a largura toda; computador: cartão com contorno.
   const boxClass = fs
     ? 'relative h-full w-full bg-black'
-    : 'relative aspect-video max-h-[72vh] w-full overflow-hidden rounded-2xl border-2 border-ink bg-black shadow-hard';
+    : `relative w-full overflow-hidden bg-black max-sm:-mx-3 max-sm:w-[calc(100%+1.5rem)] sm:rounded-2xl sm:border-2 sm:border-ink sm:shadow-hard max-sm:border-y-2 max-sm:border-ink ${
+        hostIdle ? 'min-h-[22rem]' : 'aspect-video max-h-[72dvh] landscape:max-sm:max-h-[calc(100dvh-5rem)]'
+      }`;
 
   return (
     <div className="space-y-2">
@@ -206,39 +339,28 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
           ref={videoRef}
           autoPlay
           playsInline
+          disablePictureInPicture={!pipOk}
           onPlaying={() => setHasFrames(true)}
           onLoadedData={() => setHasFrames(true)}
-          className={`h-full w-full bg-black object-contain ${hostIdle ? 'invisible' : ''}`}
+          className={`h-full w-full bg-black object-contain ${mirror && h.source === 'camera' ? '-scale-x-100' : ''} ${hostIdle ? 'invisible absolute' : ''}`}
         />
+
+        {camStream && !hostIdle && (
+          <button
+            type="button"
+            onClick={() => setBubbleBig((b) => !b)}
+            aria-label={bubbleBig ? 'Diminuir a câmera' : 'Ampliar a câmera'}
+            className={`absolute right-2 top-2 overflow-hidden rounded-xl border-2 border-white bg-black shadow-lg sm:right-3 sm:top-3 ${
+              bubbleBig ? 'w-[48%]' : 'w-[28%] min-w-[96px] max-w-[300px]'
+            }`}
+          >
+            <video ref={camRef} autoPlay muted playsInline className={`aspect-video w-full object-cover ${mirror ? '-scale-x-100' : ''}`} />
+          </button>
+        )}
 
         {hostIdle && (
           <div className="absolute inset-0 overflow-auto bg-black text-white">
-            <div className="mx-auto flex min-h-full max-w-xl flex-col items-center justify-center gap-4 p-5 text-center">
-              {snap.host.shareError === 'permission' || snap.host.shareError === 'capture' ? (
-                <ErrorScreen kind={snap.host.shareError} compact hideHome onRetry={() => void session.startSharing()} retryLabel="Escolher a tela de novo" />
-              ) : snap.host.shareError === 'unsupported' || !supportsDisplayCapture() ? (
-                <ErrorScreen
-                  kind="unsupported"
-                  compact
-                  description="Este navegador ou dispositivo não permite compartilhar a tela. Abra a sala em um computador com Chrome, Edge, Firefox ou Safari atualizado. No celular você ainda pode assistir."
-                />
-              ) : (
-                <>
-                  <span className="grid h-14 w-14 place-items-center rounded-full border-2 border-white bg-brand-600">
-                    <Icon name="monitor" size={28} />
-                  </span>
-                  <div>
-                    <h2 className="text-2xl font-black">Pronto para transmitir</h2>
-                    <p className="mt-1 text-sm font-medium text-white/80">Escolha a tela inteira, uma janela ou uma aba. Para enviar o áudio, prefira uma aba e marque “Compartilhar áudio”.</p>
-                  </div>
-                  <button type="button" className="btn btn-primary btn-lg !border-white !shadow-[4px_4px_0_0_#fff]" onClick={() => void session.startSharing()}>
-                    <Icon name="monitor" size={22} />
-                    Compartilhar tela
-                  </button>
-                  <p className="text-xs font-medium text-white/70">Mantenha esta aba aberta enquanto transmite.</p>
-                </>
-              )}
-            </div>
+            <HostStart session={session} snap={snap} />
           </div>
         )}
 
@@ -265,7 +387,7 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
           </button>
         )}
 
-        {showControls && (
+        {!hostIdle && (
           <div className={`absolute inset-x-0 bottom-0 flex items-center gap-2 bg-gradient-to-t from-black/85 to-transparent p-2 pt-8 text-white transition-opacity ${fs && idle ? 'opacity-0' : 'opacity-100'}`}>
             {!isHost && (
               <>
@@ -286,12 +408,7 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
             )}
             {isHost && <span className="px-2 text-xs font-bold">Prévia da sua transmissão (sem áudio)</span>}
             <span className="flex-1" />
-            {!isHost && (
-              <button type="button" className="ctl gap-1.5 !px-2.5 text-xs font-bold" onClick={() => setStatsOpen((o) => !o)} aria-expanded={statsOpen} aria-label="Qualidade da conexão">
-                <span className={`h-2.5 w-2.5 rounded-full border border-white ${vs ? QUALITY_COLOR[vs.quality] : 'bg-zinc-400'}`} />
-                {vs ? QUALITY_LABEL[vs.quality] : 'Medindo'}
-              </button>
-            )}
+            {!isHost && <LinkBadge session={session} open={statsOpen} onToggle={() => setStatsOpen((o) => !o)} />}
             {pipOk && (
               <button type="button" className="ctl" onClick={togglePip} aria-label="Picture-in-Picture">
                 <Icon name="pip" />
@@ -303,23 +420,10 @@ export default function Stage({ session, snap }: { session: RoomSession; snap: S
           </div>
         )}
 
-        {!isHost && statsOpen && vs && (
-          <dl className="absolute bottom-14 right-2 grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5 rounded-xl border-2 border-white bg-black/90 p-3 text-xs text-white">
-            <dt className="text-white/70">Resolução</dt>
-            <dd className="font-bold">{vs.width ? `${vs.width}x${vs.height}` : '-'}</dd>
-            <dt className="text-white/70">Quadros por segundo</dt>
-            <dd className="font-bold">{vs.fps || '-'}</dd>
-            <dt className="text-white/70">Taxa de vídeo</dt>
-            <dd className="font-bold">{formatKbps(vs.kbps)}</dd>
-            <dt className="text-white/70">Perda de pacotes</dt>
-            <dd className="font-bold">{vs.lossPct}%</dd>
-            <dt className="text-white/70">Latência estimada</dt>
-            <dd className="font-bold">{vs.latencyMs !== null ? `${vs.latencyMs} ms` : '-'}</dd>
-            <dt className="text-white/70">Ping</dt>
-            <dd className="font-bold">{vs.rttMs !== null ? `${vs.rttMs} ms` : '-'}</dd>
-          </dl>
-        )}
+        {!isHost && statsOpen && <StatsPanel session={session} />}
       </div>
     </div>
   );
 }
+
+export default memo(Stage);
