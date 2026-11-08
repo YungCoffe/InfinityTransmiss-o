@@ -1,0 +1,172 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Identidade: vermelho Natal (#C8102E), branco e preto puro. Contornos pretos grossos e sombras duras
+  em vez de sombras suaves; títulos em peso 900 do próprio sistema (sem fontes externas, por privacidade).
+*/
+:root {
+  color-scheme: light;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  background: #fff;
+  color: #000;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+:focus-visible {
+  outline: 3px solid #000;
+  outline-offset: 2px;
+}
+
+.display {
+  font-weight: 900;
+  letter-spacing: -0.045em;
+  line-height: 0.95;
+}
+
+/* Fita de bengala de doce: separa as áreas da página. */
+.candy {
+  height: 12px;
+  border-block: 2px solid #000;
+  background: repeating-linear-gradient(-45deg, #c8102e 0 10px, #fff 10px 20px);
+}
+
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 2px solid #000;
+    border-radius: 0.875rem;
+    background: #fff;
+    color: #000;
+    padding: 0.65rem 1rem;
+    font-size: 0.9rem;
+    font-weight: 800;
+    line-height: 1.1;
+    box-shadow: 3px 3px 0 0 #000;
+    cursor: pointer;
+    user-select: none;
+    transition: transform 0.08s, box-shadow 0.08s, background-color 0.15s;
+  }
+  .btn:hover {
+    background: #f4f4f5;
+  }
+  .btn:active {
+    transform: translate(3px, 3px);
+    box-shadow: 0 0 0 0 #000;
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: 3px 3px 0 0 #000;
+  }
+  .btn-primary {
+    background: #c8102e;
+    color: #fff;
+  }
+  .btn-primary:hover {
+    background: #a30d25;
+  }
+  .btn-dark {
+    background: #000;
+    color: #fff;
+    box-shadow: 3px 3px 0 0 #c8102e;
+  }
+  .btn-dark:hover {
+    background: #27272a;
+  }
+  .btn-lg {
+    padding: 1rem 1.5rem;
+    font-size: 1.05rem;
+    border-radius: 1rem;
+  }
+  .btn-sm {
+    padding: 0.45rem 0.75rem;
+    font-size: 0.8rem;
+    box-shadow: 2px 2px 0 0 #000;
+  }
+  .btn-sm:active {
+    transform: translate(2px, 2px);
+  }
+
+  .card {
+    background: #fff;
+    border: 2px solid #000;
+    border-radius: 1.25rem;
+    box-shadow: 5px 5px 0 0 #000;
+  }
+
+  .input {
+    width: 100%;
+    border: 2px solid #000;
+    border-radius: 0.875rem;
+    background: #fff;
+    color: #000;
+    padding: 0.75rem 1rem;
+    font-size: 1rem;
+  }
+  .input:focus {
+    outline: none;
+    border-color: #c8102e;
+    box-shadow: 0 0 0 3px rgba(200, 16, 46, 0.35);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border: 2px solid #000;
+    border-radius: 999px;
+    background: #fff;
+    color: #000;
+    padding: 0.2rem 0.7rem;
+    font-size: 0.78rem;
+    font-weight: 800;
+  }
+
+  /* Botões sobre o vídeo */
+  .ctl {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 2.25rem;
+    min-width: 2.25rem;
+    border-radius: 0.6rem;
+    border: 2px solid transparent;
+    color: #fff;
+    cursor: pointer;
+  }
+  .ctl:hover {
+    background: rgba(255, 255, 255, 0.18);
+  }
+  .ctl:focus-visible {
+    outline-color: #fff;
+  }
+}
+
+input[type='range'] {
+  accent-color: #c8102e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
