@@ -15,6 +15,9 @@ export function useRoomSession(code: string) {
   return { session, snap };
 }
 
+export const useHostStats = (session: RoomSession) => useSyncExternalStore(session.subscribeStats, session.getHostStats, session.getHostStats);
+export const useViewerStats = (session: RoomSession) => useSyncExternalStore(session.subscribeStats, session.getViewerStats, session.getViewerStats);
+
 /** Mantém a tela acesa enquanto transmite ou assiste (celulares). */
 export function useWakeLock(active: boolean) {
   useEffect(() => {

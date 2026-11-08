@@ -2,15 +2,17 @@
  * WebRTC nativo em topologia de estrela:
  *   HostBroadcaster  → um RTCPeerConnection por espectador (o host sempre envia a oferta)
  *   ViewerReceiver   → um RTCPeerConnection que apenas responde e recebe
- * Para evoluir para um SFU (LiveKit, mediasoup, Janus) basta trocar estas duas classes: o restante do app
- * só conhece start/stop/replaceSource (host) e onStream/onState/onStats (espectador).
+ * Cada conexão tem 3 "transceivers" fixos: vídeo principal (tela ou câmera), áudio (mixagem) e câmera-balão.
+ * Trocar fonte, ligar a câmera ou o microfone usa replaceTrack e não renegocia nada.
+ * Para evoluir para um SFU (LiveKit, mediasoup, Janus) basta trocar estas duas classes.
  */
-import { randomId } from './utils';
+import { isMobileDevice, randomId } from './utils';
 
 export type SignalData = { sid: string; description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
 
-export type QualityKey = '1440p' | '1080p60' | '1080p' | '720p' | '480p';
+export type QualityKey = 'max' | '1440p60' | '1080p60' | '1080p' | '720p' | '480p';
 export type ContentMode = 'detail' | 'motion';
+export type HostSource = 'screen' | 'camera';
 export type MediaState = 'waiting' | 'connecting' | 'connected' | 'reconnecting' | 'failed';
 export type LinkQuality = 'excellent' | 'good' | 'fair' | 'poor';
 
@@ -24,13 +26,25 @@ export interface QualityProfile {
   minBitrate: number;
 }
 
+/** Tetos de qualidade. O envio real se ajusta sozinho (rede, CPU, nº de espectadores e tela de cada espectador). */
 export const QUALITY_PROFILES: Record<QualityKey, QualityProfile> = {
-  '1440p': { key: '1440p', label: '1440p, 30 fps (máxima)', width: 2560, height: 1440, fps: 30, maxBitrate: 10_000_000, minBitrate: 500_000 },
-  '1080p60': { key: '1080p60', label: '1080p, 60 fps (fluidez)', width: 1920, height: 1080, fps: 60, maxBitrate: 9_000_000, minBitrate: 500_000 },
-  '1080p': { key: '1080p', label: '1080p, 30 fps (recomendada)', width: 1920, height: 1080, fps: 30, maxBitrate: 6_000_000, minBitrate: 400_000 },
-  '720p': { key: '720p', label: '720p, 30 fps (equilibrada)', width: 1280, height: 720, fps: 30, maxBitrate: 3_000_000, minBitrate: 300_000 },
+  max: { key: 'max', label: 'Máxima (até 4K, 60 fps)', width: 3840, height: 2160, fps: 60, maxBitrate: 20_000_000, minBitrate: 1_000_000 },
+  '1440p60': { key: '1440p60', label: '1440p, 60 fps', width: 2560, height: 1440, fps: 60, maxBitrate: 14_000_000, minBitrate: 800_000 },
+  '1080p60': { key: '1080p60', label: '1080p, 60 fps', width: 1920, height: 1080, fps: 60, maxBitrate: 10_000_000, minBitrate: 600_000 },
+  '1080p': { key: '1080p', label: '1080p, 30 fps', width: 1920, height: 1080, fps: 30, maxBitrate: 6_000_000, minBitrate: 400_000 },
+  '720p': { key: '720p', label: '720p, 30 fps', width: 1280, height: 720, fps: 30, maxBitrate: 3_000_000, minBitrate: 300_000 },
   '480p': { key: '480p', label: '480p, 30 fps (economia)', width: 854, height: 480, fps: 30, maxBitrate: 1_200_000, minBitrate: 200_000 },
 };
+
+export const AUDIO_KBPS = 192; // Opus estéreo
+export const BUBBLE = { width: 1280, height: 720, fps: 30, maxBitrate: 2_500_000 }; // câmera sobre a tela
+
+export interface HostTracks {
+  video: MediaStreamTrack;
+  audio: MediaStreamTrack | null;
+  camera: MediaStreamTrack | null;
+  source: HostSource;
+}
 
 export interface HostStats {
   viewers: number;
@@ -41,6 +55,7 @@ export interface HostStats {
   height: number | null;
   fps: number | null;
   reduced: boolean;
+  cpuLimited: boolean;
 }
 
 export interface ViewerStats {
@@ -55,19 +70,81 @@ export interface ViewerStats {
   latencyMs: number | null;
 }
 
-/** Prefere VP9 (texto nítido em bitrates menores), depois H.264, VP8 e AV1. O navegador negocia o que ambos suportam. */
-function preferCodecs(tx: RTCRtpTransceiver) {
+export function shallowEqual(a: object | null, b: object | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ka = Object.keys(a) as (keyof typeof a)[];
+  return ka.length === Object.keys(b).length && ka.every((k) => a[k] === (b as any)[k]);
+}
+
+/** Ordena os codecs de vídeo. "hardwareFirst" prioriza H.264 (decodifica/codifica em hardware quase sempre). */
+function preferCodecs(tx: RTCRtpTransceiver, kind: 'send' | 'recv', hardwareFirst: boolean) {
   try {
-    const caps = (RTCRtpSender as any).getCapabilities?.('video');
+    const api: any = kind === 'send' ? RTCRtpSender : RTCRtpReceiver;
+    const caps = api.getCapabilities?.('video');
     if (!caps || typeof (tx as any).setCodecPreferences !== 'function') return;
-    const rank = (mime: string) => {
-      const m = mime.toLowerCase();
-      return m === 'video/vp9' ? 0 : m === 'video/h264' ? 1 : m === 'video/vp8' ? 2 : m === 'video/av1' ? 3 : 4;
+    const order = hardwareFirst ? ['video/h264', 'video/vp9', 'video/vp8', 'video/av1'] : ['video/vp9', 'video/h264', 'video/vp8', 'video/av1'];
+    const rank = (m: string) => {
+      const i = order.indexOf(m.toLowerCase());
+      return i < 0 ? order.length : i;
     };
-    const sorted = [...caps.codecs].sort((a: any, b: any) => rank(a.mimeType) - rank(b.mimeType));
-    (tx as any).setCodecPreferences(sorted);
+    (tx as any).setCodecPreferences([...caps.codecs].sort((a: any, b: any) => rank(a.mimeType) - rank(b.mimeType)));
   } catch {
     /* mantém a ordem padrão */
+  }
+}
+
+/** Opus em estéreo e com bitrate alto (padrão do WebRTC é mono e ~32 kbps). */
+function tuneOpus(sdp: string, kbps: number): string {
+  const lines = sdp.split(/\r?\n/);
+  const pts = new Set<string>();
+  const hasFmtp = new Set<string>();
+  for (const l of lines) {
+    const r = l.match(/^a=rtpmap:(\d+) opus\/48000\/2/i);
+    if (r) pts.add(r[1]);
+    const f = l.match(/^a=fmtp:(\d+) /);
+    if (f) hasFmtp.add(f[1]);
+  }
+  if (!pts.size) return sdp;
+  const want: [string, string][] = [
+    ['stereo', '1'],
+    ['sprop-stereo', '1'],
+    ['maxaveragebitrate', String(kbps * 1000)],
+    ['maxplaybackrate', '48000'],
+    ['useinbandfec', '1'],
+    ['usedtx', '0'],
+  ];
+  const merge = (existing: string) => {
+    const map = new Map<string, string>();
+    for (const part of existing.split(';')) {
+      const s = part.trim();
+      if (!s) continue;
+      const i = s.indexOf('=');
+      if (i < 0) map.set(s, '');
+      else map.set(s.slice(0, i), s.slice(i + 1));
+    }
+    for (const [k, v] of want) map.set(k, v);
+    return [...map].map(([k, v]) => (v === '' ? k : `${k}=${v}`)).join(';');
+  };
+  const out: string[] = [];
+  for (const l of lines) {
+    const f = l.match(/^a=fmtp:(\d+) (.*)$/);
+    if (f && pts.has(f[1])) {
+      out.push(`a=fmtp:${f[1]} ${merge(f[2])}`);
+      continue;
+    }
+    out.push(l);
+    const r = l.match(/^a=rtpmap:(\d+) opus\/48000\/2/i);
+    if (r && !hasFmtp.has(r[1])) out.push(`a=fmtp:${r[1]} ${merge('')}`);
+  }
+  return out.join('\r\n');
+}
+
+async function setLocalTuned(pc: RTCPeerConnection, desc: RTCSessionDescriptionInit) {
+  try {
+    await pc.setLocalDescription({ type: desc.type, sdp: tuneOpus(desc.sdp ?? '', AUDIO_KBPS) });
+  } catch {
+    await pc.setLocalDescription(desc); // se o navegador recusar o ajuste, segue com o padrão
   }
 }
 
@@ -76,14 +153,19 @@ function preferCodecs(tx: RTCRtpTransceiver) {
 interface Peer {
   id: string;
   epoch: string;
+  maxHeight: number | null;
   sid: string;
   pc: RTCPeerConnection;
+  vTx: RTCRtpTransceiver;
   video: RTCRtpSender;
   audio: RTCRtpSender;
+  cam: RTCRtpSender;
   pending: RTCIceCandidateInit[];
   remoteReady: boolean;
   level: number;
+  cpuScale: number;
   stable: number;
+  cpuStreak: number;
   restarts: number;
   restartTimer: ReturnType<typeof setTimeout> | null;
   audioTuned: boolean;
@@ -92,7 +174,8 @@ interface Peer {
   kbps: number;
   rtt: number | null;
   loss: number;
-  limited: boolean;
+  limitedBw: boolean;
+  limitedCpu: boolean;
   fw: number | null;
   fh: number | null;
   fps: number | null;
@@ -104,45 +187,49 @@ interface HostOptions {
   onStats?: (stats: HostStats | null) => void;
 }
 
+interface ViewerInfo {
+  epoch: string;
+  maxHeight: number | null;
+}
+
 export class HostBroadcaster {
   private peers = new Map<string, Peer>();
-  private viewers = new Map<string, string>();
-  private stream: MediaStream | null = null;
+  private viewers = new Map<string, ViewerInfo>();
+  private tracks: HostTracks | null = null;
   private quality: QualityKey = '1080p';
   private mode: ContentMode = 'detail';
   private paused = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private destroyed = false;
+  /** Pixels por segundo que este aparelho consegue codificar somando todos os espectadores (cada um é uma codificação). */
+  private budget = isMobileDevice() ? 150e6 : 520e6;
 
   constructor(private opts: HostOptions) {}
 
   get streaming() {
-    return this.stream !== null;
+    return this.tracks !== null;
   }
 
-  start(stream: MediaStream) {
-    this.stream = stream;
-    this.decorate(stream);
+  start(tracks: HostTracks) {
+    this.tracks = tracks;
+    this.decorate();
     if (!this.timer) this.timer = setInterval(() => void this.tick(), 2000);
-    for (const [id, epoch] of this.viewers) void this.connectViewer(id, epoch);
+    for (const [id, v] of this.viewers) void this.connectViewer(id, v);
   }
 
-  /** Troca a fonte compartilhada sem renegociar: só substitui as faixas nos remetentes existentes. */
-  replaceSource(stream: MediaStream) {
-    this.stream = stream;
-    this.decorate(stream);
-    const v = stream.getVideoTracks()[0] ?? null;
-    const a = stream.getAudioTracks()[0] ?? null;
+  /** Troca tela/câmera/áudio/balão sem renegociar: só substitui as faixas dos remetentes. */
+  update(tracks: HostTracks) {
+    this.tracks = tracks;
+    this.decorate();
     for (const p of this.peers.values()) {
-      void p.video.replaceTrack(v).catch(() => {});
-      void p.audio.replaceTrack(a).catch(() => {});
+      this.replace(p);
       void this.applyParams(p);
     }
   }
 
   stop() {
     for (const id of [...this.peers.keys()]) this.closePeer(id);
-    this.stream = null;
+    this.tracks = null;
     this.paused = false;
     if (this.timer) {
       clearInterval(this.timer);
@@ -159,31 +246,26 @@ export class HostBroadcaster {
 
   setPaused(paused: boolean) {
     this.paused = paused;
-    this.stream?.getTracks().forEach((t) => (t.enabled = !paused));
+    const t = this.tracks;
+    if (t) for (const tr of [t.video, t.audio, t.camera]) if (tr) tr.enabled = !paused;
   }
 
   setQuality(key: QualityKey) {
     this.quality = key;
-    if (this.stream) this.decorate(this.stream);
+    this.decorate();
     for (const p of this.peers.values()) void this.applyParams(p);
   }
 
   setMode(mode: ContentMode) {
     this.mode = mode;
-    const v = this.stream?.getVideoTracks()[0];
-    if (v) {
-      try {
-        v.contentHint = mode === 'detail' ? 'detail' : 'motion';
-      } catch {
-        /* ignora */
-      }
-    }
+    this.decorate(false);
     for (const p of this.peers.values()) void this.applyParams(p);
   }
 
-  viewerJoined(id: string, epoch: string) {
-    this.viewers.set(id, epoch);
-    if (this.stream) void this.connectViewer(id, epoch);
+  viewerJoined(id: string, epoch: string, maxHeight?: number | null) {
+    const info = { epoch, maxHeight: maxHeight ?? null };
+    this.viewers.set(id, info);
+    if (this.tracks) void this.connectViewer(id, info);
   }
 
   viewerLeft(id: string) {
@@ -192,12 +274,13 @@ export class HostBroadcaster {
     this.emit();
   }
 
-  viewerRequest(id: string, epoch: string) {
-    this.viewers.set(id, epoch);
-    if (!this.stream) return;
+  viewerRequest(id: string, epoch: string, maxHeight?: number | null) {
+    const info = { epoch, maxHeight: maxHeight ?? null };
+    this.viewers.set(id, info);
+    if (!this.tracks) return;
     const p = this.peers.get(id);
     if (p && p.epoch === epoch) this.restartIce(p, true);
-    else void this.connectViewer(id, epoch);
+    else void this.connectViewer(id, info);
   }
 
   async handleSignal(from: string, data: SignalData) {
@@ -221,53 +304,70 @@ export class HostBroadcaster {
 
   /* ---- internos ---- */
 
-  private decorate(stream: MediaStream) {
+  private decorate(constrain = true) {
+    const t = this.tracks;
+    if (!t) return;
     const prof = QUALITY_PROFILES[this.quality];
-    stream.getTracks().forEach((t) => (t.enabled = !this.paused));
-    const v = stream.getVideoTracks()[0];
-    if (!v) return;
+    for (const tr of [t.video, t.audio, t.camera]) if (tr) tr.enabled = !this.paused;
     try {
-      v.contentHint = this.mode === 'detail' ? 'detail' : 'motion';
+      // "detail" mantém texto nítido; "motion" prioriza fluidez. Câmeras sempre usam "motion".
+      t.video.contentHint = t.source === 'camera' || this.mode === 'motion' ? 'motion' : 'detail';
+      if (t.camera) t.camera.contentHint = 'motion';
     } catch {
       /* ignora */
     }
-    // Limita a captura ao perfil escolhido (economiza CPU em telas 4K). Falhas são inofensivas.
-    void v
-      .applyConstraints({
-        width: { ideal: prof.width },
-        height: { ideal: prof.height },
-        frameRate: { ideal: prof.fps, max: prof.fps },
-      })
-      .catch(() => {});
+    if (constrain) {
+      // Limita a captura ao perfil escolhido (economiza CPU em telas 4K). Falhas são inofensivas.
+      void t.video
+        .applyConstraints({ width: { ideal: prof.width }, height: { ideal: prof.height }, frameRate: { ideal: prof.fps, max: prof.fps } })
+        .catch(() => {});
+    }
   }
 
-  private async connectViewer(id: string, epoch: string) {
-    if (!this.stream || this.destroyed || !this.viewers.has(id)) return;
+  private replace(p: Peer) {
+    const t = this.tracks;
+    if (!t) return;
+    void p.video.replaceTrack(t.video).catch(() => {});
+    void p.audio.replaceTrack(t.audio).catch(() => {});
+    void p.cam.replaceTrack(t.camera).catch(() => {});
+  }
+
+  private async connectViewer(id: string, info: ViewerInfo) {
+    const t = this.tracks;
+    if (!t || this.destroyed || !this.viewers.has(id)) return;
     const existing = this.peers.get(id);
     if (existing) {
       const st = existing.pc.connectionState;
-      if (existing.epoch === epoch && (st === 'connected' || st === 'connecting' || st === 'new')) return;
+      existing.maxHeight = info.maxHeight;
+      if (existing.epoch === info.epoch && (st === 'connected' || st === 'connecting' || st === 'new')) return;
       this.closePeer(id);
     }
     const pc = new RTCPeerConnection({ iceServers: this.opts.iceServers, bundlePolicy: 'max-bundle' });
-    const vTrack = this.stream.getVideoTracks()[0] ?? null;
-    const aTrack = this.stream.getAudioTracks()[0] ?? null;
-    // Os dois transceivers existem sempre: assim a troca de fonte (com ou sem áudio) não precisa renegociar.
-    const vTx = vTrack ? pc.addTransceiver(vTrack, { direction: 'sendonly' }) : pc.addTransceiver('video', { direction: 'sendonly' });
-    const aTx = aTrack ? pc.addTransceiver(aTrack, { direction: 'sendonly' }) : pc.addTransceiver('audio', { direction: 'sendonly' });
-    preferCodecs(vTx);
+    // Três transceivers fixos (vídeo principal, áudio e câmera-balão): a ordem é como o espectador os identifica.
+    const vTx = pc.addTransceiver(t.video, { direction: 'sendonly' });
+    const aTx = pc.addTransceiver(t.audio ?? 'audio', { direction: 'sendonly' });
+    const cTx = pc.addTransceiver(t.camera ?? 'video', { direction: 'sendonly' });
+    const prof = QUALITY_PROFILES[this.quality];
+    const hardwareFirst = prof.fps >= 60 || prof.height >= 1440 || t.source === 'camera';
+    preferCodecs(vTx, 'send', hardwareFirst);
+    preferCodecs(cTx, 'send', true);
 
     const peer: Peer = {
       id,
-      epoch,
+      epoch: info.epoch,
+      maxHeight: info.maxHeight,
       sid: randomId(8),
       pc,
+      vTx,
       video: vTx.sender,
       audio: aTx.sender,
+      cam: cTx.sender,
       pending: [],
       remoteReady: false,
       level: 1,
+      cpuScale: 1,
       stable: 0,
+      cpuStreak: 0,
       restarts: 0,
       restartTimer: null,
       audioTuned: false,
@@ -276,7 +376,8 @@ export class HostBroadcaster {
       kbps: 0,
       rtt: null,
       loss: 0,
-      limited: false,
+      limitedBw: false,
+      limitedCpu: false,
       fw: null,
       fh: null,
       fps: null,
@@ -294,7 +395,7 @@ export class HostBroadcaster {
     if (this.peers.get(p.id) !== p) return;
     try {
       const offer = await p.pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
-      await p.pc.setLocalDescription(offer);
+      await setLocalTuned(p.pc, offer);
       if (this.peers.get(p.id) !== p || !p.pc.localDescription) return;
       this.opts.send(p.id, { sid: p.sid, description: { type: p.pc.localDescription.type, sdp: p.pc.localDescription.sdp } });
       if (iceRestart) {
@@ -331,9 +432,10 @@ export class HostBroadcaster {
     if (!force && p.pc.connectionState === 'connected') return;
     p.restarts += 1;
     if (p.restarts > 4) {
-      const { id, epoch } = p;
+      const { id } = p;
+      const info = { epoch: p.epoch, maxHeight: p.maxHeight };
       this.closePeer(id);
-      setTimeout(() => void this.connectViewer(id, epoch), 1000);
+      setTimeout(() => void this.connectViewer(id, info), 1000);
       return;
     }
     void this.negotiate(p, true);
@@ -353,29 +455,34 @@ export class HostBroadcaster {
     }
   }
 
-  private nativeScale(): number {
-    const prof = QUALITY_PROFILES[this.quality];
-    const s = this.stream?.getVideoTracks()[0]?.getSettings();
-    const w = s?.width ?? prof.width;
-    const h = s?.height ?? prof.height;
-    return Math.max(1, w / prof.width, h / prof.height);
-  }
-
-  /** Ajusta bitrate, fps e resolução de cada espectador conforme perfil, nº de espectadores e qualidade do link. */
+  /**
+   * Ajusta bitrate, fps e resolução de cada espectador. Considera: teto do perfil, nº de espectadores (upload e CPU
+   * são divididos), qualidade do link, CPU do aparelho e o tamanho real da tela de cada espectador.
+   */
   private async applyParams(p: Peer) {
-    if (this.peers.get(p.id) !== p) return;
+    const t = this.tracks;
+    if (!t || this.peers.get(p.id) !== p) return;
     const prof = QUALITY_PROFILES[this.quality];
     const n = Math.max(1, this.peers.size);
-    const share = n <= 2 ? 1 : Math.max(0.3, 2 / n); // muitos espectadores dividem o upload do host
+    const share = n <= 2 ? 1 : Math.max(0.3, 2 / n);
     const target = Math.max(prof.minBitrate, Math.min(prof.maxBitrate, prof.maxBitrate * share * p.level));
     const ratio = target / prof.maxBitrate;
 
-    let extraScale = 1;
+    const s = t.video.getSettings();
+    const w = s.width || prof.width;
+    const h = s.height || prof.height;
     let fps = prof.fps;
+    let extra = 1;
     if (ratio < 0.5) {
-      if (this.mode === 'detail') fps = Math.min(prof.fps, ratio < 0.3 ? 15 : 24); // mantém o texto nítido
-      else extraScale = ratio < 0.25 ? 2 : 1.5; // mantém a fluidez
+      if (t.source === 'screen' && this.mode === 'detail') fps = Math.min(fps, ratio < 0.3 ? 15 : 24); // mantém o texto nítido
+      else extra = ratio < 0.25 ? 2 : 1.5; // mantém a fluidez
     }
+    let scale = Math.max(1, w / prof.width, h / prof.height) * extra * p.cpuScale;
+    if (p.maxHeight) scale = Math.max(scale, h / p.maxHeight); // não envia mais pixels do que a tela do espectador mostra
+    const cost = () => (w / scale) * (h / scale) * fps * n;
+    if (cost() > this.budget && fps > 30) fps = 30;
+    if (cost() > this.budget) scale *= Math.sqrt(cost() / this.budget);
+    scale = Math.min(4, Math.round(scale * 100) / 100);
 
     try {
       const params = p.video.getParameters();
@@ -383,21 +490,43 @@ export class HostBroadcaster {
         const enc = params.encodings[0] as any;
         enc.maxBitrate = Math.round(target);
         enc.maxFramerate = fps;
-        enc.scaleResolutionDownBy = Math.round(this.nativeScale() * extraScale * 100) / 100;
+        enc.scaleResolutionDownBy = scale;
         enc.networkPriority = 'high';
         enc.priority = 'high';
         await p.video.setParameters(params);
       }
-      if (!p.audioTuned) {
+    } catch {
+      /* será reaplicado no próximo ciclo */
+    }
+
+    if (t.camera) {
+      try {
+        const cs = t.camera.getSettings();
+        const params = p.cam.getParameters();
+        if (params.encodings && params.encodings.length) {
+          const enc = params.encodings[0] as any;
+          enc.maxBitrate = Math.round(BUBBLE.maxBitrate * Math.max(0.3, Math.min(1, share)));
+          enc.maxFramerate = BUBBLE.fps;
+          enc.scaleResolutionDownBy = Math.max(1, (cs.width || BUBBLE.width) / BUBBLE.width, (cs.height || BUBBLE.height) / BUBBLE.height);
+          await p.cam.setParameters(params);
+        }
+      } catch {
+        /* ignora */
+      }
+    }
+
+    if (!p.audioTuned) {
+      try {
         const ap = p.audio.getParameters();
         if (ap.encodings && ap.encodings.length) {
-          (ap.encodings[0] as any).maxBitrate = 160_000;
+          (ap.encodings[0] as any).maxBitrate = AUDIO_KBPS * 1000;
+          (ap.encodings[0] as any).networkPriority = 'high';
           await p.audio.setParameters(ap);
           p.audioTuned = true;
         }
+      } catch {
+        /* ignora */
       }
-    } catch {
-      /* será reaplicado no próximo ciclo */
     }
   }
 
@@ -410,32 +539,30 @@ export class HostBroadcaster {
     if (p.pc.connectionState === 'closed') return;
     try {
       const report = await p.pc.getStats();
-      let bytes = 0;
-      let ts = 0;
-      let loss = 0;
-      let rtt = null as number | null;
-      let limited = false;
+      const outs: any[] = [];
+      const remotes: any[] = [];
+      let pairRtt = null as number | null;
       report.forEach((r: any) => {
-        if (r.type === 'outbound-rtp' && r.kind === 'video') {
-          bytes = r.bytesSent ?? 0;
-          ts = r.timestamp;
-          limited = r.qualityLimitationReason === 'bandwidth';
-          p.fw = r.frameWidth ?? p.fw;
-          p.fh = r.frameHeight ?? p.fh;
-          p.fps = r.framesPerSecond ?? p.fps;
-        } else if (r.type === 'remote-inbound-rtp' && r.kind === 'video') {
-          loss = r.fractionLost ?? 0;
-          if (typeof r.roundTripTime === 'number') rtt = r.roundTripTime * 1000;
-        } else if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated && rtt === null && typeof r.currentRoundTripTime === 'number') {
-          rtt = r.currentRoundTripTime * 1000;
-        }
+        if (r.type === 'outbound-rtp' && r.kind === 'video') outs.push(r);
+        else if (r.type === 'remote-inbound-rtp' && r.kind === 'video') remotes.push(r);
+        else if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated && typeof r.currentRoundTripTime === 'number') pairRtt = r.currentRoundTripTime * 1000;
       });
+      const area = (r: any) => (r.frameWidth ?? 0) * (r.frameHeight ?? 0);
+      const main = outs.find((r) => r.mid !== undefined && r.mid === p.vTx.mid) ?? [...outs].sort((a, b) => area(b) - area(a))[0];
+      if (!main) return;
+      const remote = remotes.find((r) => r.ssrc === main.ssrc) ?? remotes[0];
+      const bytes = main.bytesSent ?? 0;
+      const ts = main.timestamp;
       if (p.lastTs && ts > p.lastTs) p.kbps = Math.max(0, ((bytes - p.lastBytes) * 8) / (ts - p.lastTs));
       p.lastBytes = bytes;
       p.lastTs = ts;
-      p.rtt = rtt;
-      p.loss = loss;
-      p.limited = limited;
+      p.fw = main.frameWidth ?? p.fw;
+      p.fh = main.frameHeight ?? p.fh;
+      p.fps = main.framesPerSecond ?? p.fps;
+      p.limitedBw = main.qualityLimitationReason === 'bandwidth';
+      p.limitedCpu = main.qualityLimitationReason === 'cpu';
+      p.loss = remote?.fractionLost ?? 0;
+      p.rtt = typeof remote?.roundTripTime === 'number' ? remote.roundTripTime * 1000 : pairRtt;
       this.adapt(p);
     } catch {
       /* conexão fechando */
@@ -444,37 +571,52 @@ export class HostBroadcaster {
 
   private adapt(p: Peer) {
     if (p.pc.connectionState !== 'connected') return;
-    const bad = p.loss > 0.08 || (p.limited && p.loss > 0.03) || (p.rtt ?? 0) > 700;
-    const good = p.loss < 0.02 && (p.rtt ?? 0) < 350 && !p.limited;
+    // CPU no limite: reduz a resolução enviada (mais efetivo do que reduzir só o bitrate).
+    p.cpuStreak = p.limitedCpu ? p.cpuStreak + 1 : 0;
+    let changed = false;
+    if (p.cpuStreak >= 2) {
+      p.cpuStreak = 0;
+      p.cpuScale = Math.min(2.5, p.cpuScale * 1.25);
+      changed = true;
+    }
+    const bad = p.loss > 0.08 || (p.limitedBw && p.loss > 0.03) || (p.rtt ?? 0) > 700;
+    const good = p.loss < 0.02 && (p.rtt ?? 0) < 350 && !p.limitedBw && !p.limitedCpu;
     if (bad) {
       p.stable = 0;
       p.level = Math.max(0.15, p.level * 0.7);
-      void this.applyParams(p);
+      changed = true;
     } else if (good) {
-      if (++p.stable >= 3 && p.level < 1) {
+      if (++p.stable >= 3) {
         p.stable = 0;
-        p.level = Math.min(1, p.level * 1.2);
-        void this.applyParams(p);
+        if (p.level < 1) {
+          p.level = Math.min(1, p.level * 1.2);
+          changed = true;
+        } else if (p.cpuScale > 1) {
+          p.cpuScale = Math.max(1, p.cpuScale / 1.1);
+          changed = true;
+        }
       }
     } else {
       p.stable = 0;
     }
+    if (changed) void this.applyParams(p);
   }
 
   private emit() {
-    if (!this.opts.onStats || !this.stream) return;
+    if (!this.opts.onStats || !this.tracks) return;
     const connected = [...this.peers.values()].filter((p) => p.pc.connectionState === 'connected');
     const first = connected[0];
     const rtts = connected.map((p) => p.rtt).filter((v): v is number => typeof v === 'number');
     this.opts.onStats({
       viewers: this.viewers.size,
       connected: connected.length,
-      totalKbps: Math.round(connected.reduce((a, p) => a + p.kbps, 0)),
+      totalKbps: Math.round(connected.reduce((a, p) => a + p.kbps, 0) / 10) * 10,
       rttMs: rtts.length ? Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length) : null,
       width: first?.fw ?? null,
       height: first?.fh ?? null,
       fps: first?.fps ? Math.round(first.fps) : null,
       reduced: connected.some((p) => p.level < 0.6),
+      cpuLimited: connected.some((p) => p.cpuScale > 1.2),
     });
   }
 }
@@ -485,6 +627,7 @@ interface ViewerOptions {
   iceServers: RTCIceServer[];
   send: (data: SignalData) => void;
   onStream: (stream: MediaStream | null) => void;
+  onCamera: (stream: MediaStream | null) => void;
   onState: (state: MediaState) => void;
   onStats: (stats: ViewerStats | null) => void;
   onRequestStream: () => void;
@@ -503,7 +646,6 @@ export class ViewerReceiver {
   private sid: string | null = null;
   private pending: RTCIceCandidateInit[] = [];
   private remoteReady = false;
-  private stream: MediaStream | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private failTimer: ReturnType<typeof setTimeout> | null = null;
   private lastRequest = 0;
@@ -515,13 +657,18 @@ export class ViewerReceiver {
     try {
       if (data.description?.type === 'offer') {
         // sid novo = o host criou uma conexão nova; mesmo sid = renegociação / ICE restart.
-        if (!this.pc || this.sid !== data.sid) this.createPc(data.sid);
+        const fresh = !this.pc || this.sid !== data.sid;
+        if (fresh) this.createPc(data.sid);
         const pc = this.pc!;
         await pc.setRemoteDescription(data.description);
         this.remoteReady = true;
+        // Celulares: H.264 primeiro (decodificação por hardware = menos bateria e calor).
+        if (fresh && isMobileDevice()) {
+          for (const tx of pc.getTransceivers()) if (tx.receiver.track.kind === 'video') preferCodecs(tx, 'recv', true);
+        }
         for (const c of this.pending.splice(0)) await pc.addIceCandidate(c).catch(() => {});
         const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        await setLocalTuned(pc, answer);
         if (pc.localDescription) {
           this.opts.send({ sid: data.sid, description: { type: pc.localDescription.type, sdp: pc.localDescription.sdp } });
         }
@@ -538,6 +685,7 @@ export class ViewerReceiver {
   reset() {
     this.teardown();
     this.opts.onStream(null);
+    this.opts.onCamera(null);
     this.opts.onStats(null);
     this.opts.onState('waiting');
   }
@@ -563,7 +711,6 @@ export class ViewerReceiver {
     }
     this.pc = null;
     this.sid = null;
-    this.stream = null;
     this.pending = [];
     this.remoteReady = false;
     this.prev = null;
@@ -573,11 +720,16 @@ export class ViewerReceiver {
     this.teardown();
     this.sid = sid;
     const pc = new RTCPeerConnection({ iceServers: this.opts.iceServers, bundlePolicy: 'max-bundle' });
-    const stream = new MediaStream();
-    this.stream = stream;
+    const main = new MediaStream();
+    const cam = new MediaStream();
     pc.ontrack = (e) => {
-      if (!stream.getTracks().includes(e.track)) stream.addTrack(e.track);
-      this.opts.onStream(stream);
+      // O primeiro vídeo da oferta é o principal; o segundo é a câmera-balão. O áudio vai junto com o principal.
+      const videos = pc.getTransceivers().filter((t) => t.receiver.track.kind === 'video');
+      const isCam = e.track.kind === 'video' && videos.indexOf(e.transceiver) > 0;
+      const target = isCam ? cam : main;
+      if (!target.getTracks().includes(e.track)) target.addTrack(e.track);
+      if (isCam) this.opts.onCamera(cam);
+      else this.opts.onStream(main);
     };
     pc.onicecandidate = (e) => {
       if (e.candidate) this.opts.send({ sid, candidate: e.candidate.toJSON() });
@@ -585,7 +737,8 @@ export class ViewerReceiver {
     pc.onconnectionstatechange = () => this.onState();
     this.pc = pc;
     this.opts.onState('connecting');
-    this.statsTimer = setInterval(() => void this.poll(), 1000);
+    // As métricas só alimentam o indicador de qualidade: 2 s bastam e economizam bateria.
+    this.statsTimer = setInterval(() => void this.poll(), 2000);
   }
 
   private onState() {
@@ -619,27 +772,25 @@ export class ViewerReceiver {
 
   private async poll() {
     const pc = this.pc;
-    if (!pc) return;
+    if (!pc || (typeof document !== 'undefined' && document.hidden)) return; // aba em segundo plano: sem custo
     try {
       const report = await pc.getStats();
-      let bytes = 0, ts = 0, lost = 0, recv = 0, jitter = 0, jbDelay = 0, jbCount = 0, fps = 0, w = 0, h = 0;
+      const inbound: any[] = [];
       let rtt = null as number | null;
       report.forEach((r: any) => {
-        if (r.type === 'inbound-rtp' && r.kind === 'video') {
-          bytes = r.bytesReceived ?? 0;
-          ts = r.timestamp;
-          lost = r.packetsLost ?? 0;
-          recv = r.packetsReceived ?? 0;
-          jitter = (r.jitter ?? 0) * 1000;
-          jbDelay = r.jitterBufferDelay ?? 0;
-          jbCount = r.jitterBufferEmittedCount ?? 0;
-          fps = r.framesPerSecond ?? 0;
-          w = r.frameWidth ?? 0;
-          h = r.frameHeight ?? 0;
-        } else if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected) && typeof r.currentRoundTripTime === 'number') {
-          rtt = r.currentRoundTripTime * 1000;
-        }
+        if (r.type === 'inbound-rtp' && r.kind === 'video') inbound.push(r);
+        else if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected) && typeof r.currentRoundTripTime === 'number') rtt = r.currentRoundTripTime * 1000;
       });
+      const mainMid = pc.getTransceivers().filter((t) => t.receiver.track.kind === 'video')[0]?.mid;
+      const area = (r: any) => (r.frameWidth ?? 0) * (r.frameHeight ?? 0);
+      const r = inbound.find((x) => x.mid !== undefined && x.mid === mainMid) ?? [...inbound].sort((a, b) => area(b) - area(a))[0];
+      if (!r) return;
+      const bytes = r.bytesReceived ?? 0;
+      const ts = r.timestamp;
+      const lost = r.packetsLost ?? 0;
+      const recv = r.packetsReceived ?? 0;
+      const jbDelay = r.jitterBufferDelay ?? 0;
+      const jbCount = r.jitterBufferEmittedCount ?? 0;
       const prev = this.prev;
       this.prev = { ts, bytes, lost, recv, jbDelay, jbCount };
       if (!prev || ts <= prev.ts) return;
@@ -649,12 +800,13 @@ export class ViewerReceiver {
       const lossPct = dRecv + dLost > 0 ? (dLost / (dRecv + dLost)) * 100 : 0;
       const dCount = jbCount - prev.jbCount;
       const bufferMs = dCount > 0 ? ((jbDelay - prev.jbDelay) / dCount) * 1000 : null;
+      const jitter = (r.jitter ?? 0) * 1000;
       this.opts.onStats({
         quality: rateLink(lossPct, rtt, jitter),
-        kbps: Math.round(kbps),
-        fps: Math.round(fps),
-        width: w,
-        height: h,
+        kbps: Math.round(kbps / 10) * 10,
+        fps: Math.round(r.framesPerSecond ?? 0),
+        width: r.frameWidth ?? 0,
+        height: r.frameHeight ?? 0,
         lossPct: Math.round(lossPct * 10) / 10,
         rttMs: rtt === null ? null : Math.round(rtt),
         jitterMs: Math.round(jitter),

@@ -76,6 +76,19 @@ export const supportsWebRTC = () => typeof window !== 'undefined' && typeof RTCP
 export const supportsDisplayCapture = () =>
   typeof navigator !== 'undefined' && !!navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function';
 
+export const supportsCamera = () =>
+  typeof navigator !== 'undefined' && !!navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function';
+
+/** Altura útil (em pixels reais) que este aparelho consegue mostrar. O apresentador não envia mais que isso. */
+export function displayMaxHeight(): number {
+  try {
+    const short = Math.min(window.screen.width, window.screen.height) * (window.devicePixelRatio || 1);
+    return Math.max(720, Math.min(2160, Math.round(short)));
+  } catch {
+    return 1080;
+  }
+}
+
 export function isMobileDevice(): boolean {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent;

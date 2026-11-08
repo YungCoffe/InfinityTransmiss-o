@@ -12,6 +12,10 @@ export interface Participant {
 export interface StreamState {
   streaming: boolean;
   paused: boolean;
+  /** O que aparece no vídeo principal. */
+  source: 'screen' | 'camera';
+  /** Há uma câmera sobre a tela (balão). */
+  camera: boolean;
 }
 
 export interface RoomInfo {
@@ -46,5 +50,5 @@ export interface JoinOk {
   participants: Participant[];
   stream: StreamState;
   iceServers: RTCIceServer[];
-  viewers?: { clientId: string; epoch: string }[];
+  viewers?: { clientId: string; epoch: string; maxHeight: number | null }[];
 }
