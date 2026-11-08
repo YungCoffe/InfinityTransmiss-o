@@ -14,6 +14,7 @@ const securityHeaders = [
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  compress: true,
   eslint: { ignoreDuringBuilds: true },
   // O build do Render não deve falhar por causa de um aviso de tipos.
   // Para checar tipos manualmente: npx tsc --noEmit (ou troque para false para um build estrito).

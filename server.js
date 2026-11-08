@@ -85,11 +85,17 @@ const io = new Server(httpServer, {
     }
     cb(null, sameHost || config.allowedOrigins.includes(origin));
   },
+  serveClient: false, // o cliente Socket.IO já vem no bundle do site
   maxHttpBufferSize: 1e5,
-  pingInterval: 10000,
-  pingTimeout: 20000,
+  // Intervalos maiores economizam bateria no celular e toleram oscilações de rede móvel.
+  pingInterval: 20000,
+  pingTimeout: 30000,
   transports: ['websocket', 'polling'],
 });
+
+// Evita 502 intermitente atrás do proxy do Render: a conexão ociosa deve durar mais que a do proxy.
+httpServer.keepAliveTimeout = 120 * 1000;
+httpServer.headersTimeout = 125 * 1000;
 
 const manager = new RoomManager();
 registerSignaling(io, manager);
